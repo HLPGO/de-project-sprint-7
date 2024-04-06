@@ -1,19 +1,11 @@
-#1 умножить города на все события
-#2 посчитать все расстояния всех событий между всеми городами
-#3 отранжировать расстояние по возрастанию
-#4 оставить только самый ближний город
-#5 посчитать количество событий в городах каждого пользователя за 27 дней
-#6  отранжировать по убыванию
-#7 оставить самый активный город для каждого пользователя - это домашний город
-#8 город последнего события - актуальный город
-
-
 import datetime
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import SQLContext
 import pyspark.sql.functions as F
 from pyspark.sql.window import Window
 import sys
+from cdm_utils import find_distance, input_event_paths
+from pyspark.sql import SparkSession, DataFrame
 
 date = sys.argv[1]
 depth = sys.argv[2]
@@ -26,46 +18,47 @@ sql = SQLContext(sc)
 
 df_city = sql.read.csv('/user/pgoeshard/data/analytics/city')
 df_timezone = sql.read.csv('/user/pgoeshard/data/analytics/timezone')
-event_type = ['message', 'reaction', 'subscription', 'user']
 
-def df_with_city(df_events, df_city, event_id):
-    big_df = df_events.join(df_city, 'cross')
-    big_df = big_df.withColumn('distance', F.pow(F.sin((F.col('lat_1') - F.col('lat_2'))/F.lit(2))))
-    big_df_rank = big_df.withColumn("rank", F.row_number().over(Window.partitionBy(f"event.{event_id}", ).orderBy(F.desc("distance"))))
-    df_with_city = big_df_rank.groupBy(f'event.{event_id}').agg(F.first("distance"))
+def df_with_city(df_events: DataFrame, df_city: DataFrame) -> DataFrame:
+    df_with_city =  (df_events                                                     
+                    .withColumn('lat_1', F.col('lat'))        
+                    .withColumn('lon_1', F.col('lon'))        
+                    .withColumn('event_id', F.monotonically_increasing_id())      
+                    .crossJoin(df_city
+                            .withColumn('lat_2', F.col('lat'))
+                            .withColumn('lon_2', F.col('lon'))
+                            )
+                    .withColumn('distance', find_distance(F.col('lat_1'), F.col('lon_1'), F.col('lat_2'), F.col('lon_2')))
+                    .withColumn("rank", F.row_number().over(Window.partitionBy("event_id").orderBy(F.desc("distance"))))
+                    .filter('rank' == 1)
+                    )
     return df_with_city
-    
-def input_event_paths(base_path, date, depth):
-    dt = datetime.datetime.strptime(date, '%Y-%m-%d')
-    return [f"{base_path}/date={(dt-datetime.timedelta(days=x)).strftime('%Y-%m-%d')}" for x in range(int(depth))]
 
-#1 витрина
-#user_id act_city home_city travel_count travel_array local_time
+def third_cdm() -> DataFrame:
+    events = sql.read.parquet('/user/pgoeshard/data/events') 
+    ev_with_city = df_with_city(events, df_city)
+    subs = (ev_with_city.select('user', 'channel')
+                     .filter('event == subscription'))
+    candidates = (subs.alias('1').join(subs.alias('2'), '1.channel == 2.channel and 1.user != 2.user')
+                  )
+    contacters = (ev_with_city.select('message_from', 'message_to')
+                            .union(ev_with_city.select('message_to', 'message_from'))
+    )
+    two_conditions = candidates.join(contacters, 'user_id', 'left_anti')
 
-def third_cdm():
-    df_user = sql.read.parquet('/user/pgoeshard/data/analytics/cdm/users_home_city')
-    big_df_user = df_user.join(df_user, 'subscription_channel', 'cross')\
-                        .withColumn('distance', F.pow(F.sin((F.col('lat_1') - F.col('lat_2'))/F.lit(2))))\
-                        .where('distance' < 1000)\
-                        .withColumn('processed_dttm', F.current_date())
-                        
-    users_not_met = big_df_user
-    users_not_met.sql.write\
+    tmp_table = (ev_with_city.withColumn("rank", F.row_number().over(Window.partitionBy("user_id").orderBy(F.desc("event_time"))))
+                            .filter('rank' == 1)
+    )    
+
+    users_not_met = two_conditions.join(tmp_table, 'user_id', 'left')\
+                    .withColumn('dist', find_distance(F.col('lat_1'), F.col('lon_1'), F.col('lat_2'), F.col('lon_2')))\
+                    .filter('dist' < 1)\
+                    .withColumn('processed_dttm', F.current_date())\
+                    .withColumn('zone_id', F.col('city'))\
+                    .withColumn('local_time', F.from_utc_timestamp(F.col("TIME_UTC"),F.col('timezone')))
+
+    users_not_met.write\
         .format('parquet')\
         .save('/user/pgoeshard/data/analytics/cdm/cdm3')
     return
 
-
-#travel_array
-#ранжировать по городам оставить только первую запись
-#расчет travel_count
-#посчитать строки в  travel_array
-#местное время
-#F.from_utc_timestamp(F.col("TIME_UTC"),F.col('timezone'))
-#2 витрина
-#недельные, месячные агрегации
-#3 витрина
-#9 перемножить всех пользователей внутри каждого города
-#10 найти расстояния между ними, выбрать тех у кого меньше 1 км
-#11 проверить на наличие связей между ними до этого
-#12 проверить подписку на 1 канал и более

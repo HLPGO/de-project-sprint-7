@@ -1,19 +1,10 @@
-#1 умножить города на все события
-#2 посчитать все расстояния всех событий между всеми городами
-#3 отранжировать расстояние по возрастанию
-#4 оставить только самый ближний город
-#5 посчитать количество событий в городах каждого пользователя за 27 дней
-#6  отранжировать по убыванию
-#7 оставить самый активный город для каждого пользователя - это домашний город
-#8 город последнего события - актуальный город
-
-
-import datetime
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import SQLContext
 import pyspark.sql.functions as F
 from pyspark.sql.window import Window
 import sys
+from pyspark.sql import SparkSession, DataFrame
+from cdm_utils import find_distance, input_event_paths
 
 date = sys.argv[1]
 depth = sys.argv[2]
@@ -25,30 +16,51 @@ sc = SparkContext(conf=conf)
 sql = SQLContext(sc)
 
 df_city = sql.read.csv('/user/pgoeshard/data/analytics/city')
-df_timezone = sql.read.csv('/user/pgoeshard/data/analytics/timezone')
-event_type = ['message', 'reaction', 'subscription', 'user']
 
-def df_with_city(df_events, df_city, event_id):
-    big_df = df_events.join(df_city, 'cross')
-    big_df = big_df.withColumn('distance', F.pow(F.sin((F.col('lat_1') - F.col('lat_2'))/F.lit(2))))
-    big_df_rank = big_df.withColumn("rank", F.row_number().over(Window.partitionBy(f"event.{event_id}", ).orderBy(F.desc("distance"))))
-    df_with_city = big_df_rank.groupBy(f'event.{event_id}').agg(F.first("distance"))
+def df_with_city(df_events: DataFrame, df_city: DataFrame) -> DataFrame:
+    df_with_city =  (df_events                                                     
+                    .withColumn('lat_1', F.col('lat'))        
+                    .withColumn('lon_1', F.col('lon'))        
+                    .withColumn('event_id', F.monotonically_increasing_id())      
+                    .crossJoin(df_city
+                            .withColumn('lat_2', F.col('lat'))
+                            .withColumn('lon_2', F.col('lon'))
+                            )
+                    .withColumn('distance', find_distance(F.col('lat_1'), F.col('lon_1'), F.col('lat_2'), F.col('lon_2')))
+                    .withColumn("rank", F.row_number().over(Window.partitionBy("event_id").orderBy(F.desc("distance"))))
+                    .filter('rank' == 1)
+                    )
     return df_with_city
     
-def input_event_paths(base_path, date, depth):
-    dt = datetime.datetime.strptime(date, '%Y-%m-%d')
-    return [f"{base_path}/date={(dt-datetime.timedelta(days=x)).strftime('%Y-%m-%d')}" for x in range(int(depth))]
 
-def sec_cdm():
+def sec_cdm() -> DataFrame:
     paths = input_event_paths(base_path, date, depth)
     big_df = sql.read(paths)
-    df_message = df_with_city(big_df, df_city, 'message_id')
-    df_message = df_message.withColumn('month', F.date_trunc('message_ts', 'month'))\
-                            .withColumn('week', F.date_trunc('message_ts', 'week'))\
-                            .withColumn('day', F.date_trunc('message_ts', 'day'))\
-                            .groupBy('city', 'month', 'week', 'day')\
-                            .agg((F.count('month', 'week', 'day')))
-    df_message.sql.write\
+    df_events = df_with_city(big_df, df_city)
+
+    # преобразуем таблицу выделяем сквозные ключи
+    df_events =     (df_events.withColumn('user_id', F.coalesce(F.col('message_from'), F.col('reaction_from'), F.col('user')))
+                            .withColumn('event_time', F.coalesce(F.col('message_ts'), F.col('datetime')))
+                            .withColumn('event_dt', F.date_trunc('event_dt', 'day'))
+                            .withColumn("reg", F.row_number().over(Window.partitionBy("user_id").orderBy(F.desc("event_time"))))
+                    )
+
+    cdm2     =       (df_events.select('city_id', 'event_id', 'event_dt')
+                            .withColumn("month", F.date_trunc('event_dt', 'month'))
+                            .withColumn('week', F.date_trunc('event_dt', 'week'))
+                            .withColumn('message', F.when('event_type == message', 1).otherwise(0))
+                            .withColumn('reaction', F.when('event_type == reaction', 1).otherwise(0))
+                            .withColumn('subscription', F.when('event_type == subscription', 1).otherwise(0))
+                            .withColumn('registration', F.when('reg == 1', 1).otherwise(0))
+                            .groupBy('week', 'city', 'month')
+                            .agg(F.sum('message'), F.sum('reaction'), F.sum('subscription'), F.sum('registration'))
+                            .withColumn('month_message',  F.sum('message').over(Window.partitionBy('month')))
+                            .withColumn('month_reaction',  F.sum('reaction').over(Window.partitionBy('month').orderBy(F.desc('week'))))
+                            .withColumn('month_subscription',  F.sum('suscription').over(Window.partitionBy('month').orderBy(F.desc('week'))))
+                            .withColumn('month_user',  F.sum('user').over(Window.partitionBy('month').orderBy(F.desc('week'))))
+                    )
+
+    cdm2.write\
             .format('parquet')\
             .save('/user/pgoeshard/data/analytics/cdm/agg_cdm')
     return
