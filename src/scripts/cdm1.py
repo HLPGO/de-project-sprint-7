@@ -56,7 +56,7 @@ def first_cdm():
         tmp_table =     (
                         df_events
                         .withColumn("rank", F.row_number('*').over(Window.partitionBy('user_id', 'city').orderBy(F.desc("event_dt"))))
-                        .withColumn('tmp_date', F.col('event_dt') - F.col('rank'))
+                        .withColumn('tmp_date', F.col('event_dt') - F.date_sub('rank'))
                         .groupBy('user_id', 'city', 'tmp_date')
                         .agg(F.count('event_dt').alias('days_in'), F.max('event_dt').alias('max_dt'))
                         )

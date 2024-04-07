@@ -40,9 +40,11 @@ def third_cdm() -> DataFrame:
     subs = (ev_with_city.select('user', 'channel')
                      .filter('event == subscription'))
     candidates = (subs.alias('1').join(subs.alias('2'), '1.channel == 2.channel and 1.user != 2.user')
+                       .distinct()
                   )
     contacters = (ev_with_city.select('message_from', 'message_to')
                             .union(ev_with_city.select('message_to', 'message_from'))
+                            .distinct()
     )
     two_conditions = candidates.join(contacters, 'user_id', 'left_anti')
 
@@ -50,13 +52,15 @@ def third_cdm() -> DataFrame:
                             .filter('rank' == 1)
     )    
 
-    users_not_met = two_conditions.join(tmp_table, 'user_id', 'left')\
-                    .withColumn('dist', find_distance(F.col('lat_1'), F.col('lon_1'), F.col('lat_2'), F.col('lon_2')))\
-                    .filter('dist' < 1)\
-                    .withColumn('processed_dttm', F.current_date())\
-                    .withColumn('zone_id', F.col('city'))\
+    users_not_met = (two_conditions.select('user_left', 'user_right')
+                     .join(tmp_table, 'user_left = user_id', 'left')
+                     .join(tmp_table, 'user_right = user_id', 'left')
+                    .withColumn('dist', find_distance(F.col('lat_1'), F.col('lon_1'), F.col('lat_2'), F.col('lon_2')))
+                    .filter('dist' < 1)
+                    .withColumn('processed_dttm', F.current_date())
+                    .withColumn('zone_id', F.col('city'))
                     .withColumn('local_time', F.from_utc_timestamp(F.col("TIME_UTC"),F.col('timezone')))
-
+    )
     users_not_met.write\
         .format('parquet')\
         .save('/user/pgoeshard/data/analytics/cdm/cdm3')

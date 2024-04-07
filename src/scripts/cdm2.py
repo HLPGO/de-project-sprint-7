@@ -55,9 +55,9 @@ def sec_cdm() -> DataFrame:
                             .groupBy('week', 'city', 'month')
                             .agg(F.sum('message'), F.sum('reaction'), F.sum('subscription'), F.sum('registration'))
                             .withColumn('month_message',  F.sum('message').over(Window.partitionBy('month')))
-                            .withColumn('month_reaction',  F.sum('reaction').over(Window.partitionBy('month').orderBy(F.desc('week'))))
-                            .withColumn('month_subscription',  F.sum('suscription').over(Window.partitionBy('month').orderBy(F.desc('week'))))
-                            .withColumn('month_user',  F.sum('user').over(Window.partitionBy('month').orderBy(F.desc('week'))))
+                            .withColumn('month_reaction',  F.sum('reaction').over(Window.partitionBy('month')))
+                            .withColumn('month_subscription',  F.sum('suscription').over(Window.partitionBy('month')))
+                            .withColumn('month_user',  F.sum('user').over(Window.partitionBy('month')))
                     )
 
     cdm2.write\
